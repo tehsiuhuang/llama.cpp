@@ -7626,6 +7626,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     // in-place tests
     test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {64, 5, 4, 3}, false, 1e-6f, true));
 
+    // float4 vectorized path (ncols divisible by 4) and scalar fallback (ncols not divisible by 4)
+    for (uint32_t n : {4, 128, 256, 512, 1024, 4096, 8192}) {
+        test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {n, 1, 1, 1}, false, 1e-6f));
+        test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {n, 5, 4, 3}, false, 1e-6f));
+        test_cases.emplace_back(
+            new test_rms_norm(GGML_TYPE_F32, {n, 5, 4, 3}, true, 1e-6f));  // view (alignment test)
+    }
+    for (uint32_t n : {3, 5, 13, 127, 4097}) {
+        test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {n, 1, 1, 1}, false, 1e-6f));
+    }
+
     for (float eps : { 0.0f, 1e-6f, 1e-4f, 1e-1f, 1.0f }) {
         for (uint32_t n : { 64, 1025 }) {
             test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, { n, 5, 4, 3 }, eps, false));
@@ -8669,6 +8680,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_acc(GGML_TYPE_F32, {256, 17, 2, 3}, {256, 16, 2, 3}, 1));
     test_cases.emplace_back(new test_acc(GGML_TYPE_F32, {256, 17, 2, 3}, {128, 16, 2, 3}, 2));
     test_cases.emplace_back(new test_acc(GGML_TYPE_F32, {256, 17, 2, 3}, {64, 16, 2, 3}, 3));
+
+    // rms_norm: float4 vectorized path (ncols divisible by 4) and scalar fallback (ncols not divisible by 4)
+    for (uint32_t n : {4, 128, 256, 512, 768, 1024, 2048, 3072, 4096, 5120, 8192, 3, 5, 13, 127, 4097}) {
+        for (int64_t nrows : {1, 32, 512}) {
+            test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {n, nrows, 1, 1}, false, 1e-6f));
+        }
+    }
 
     return test_cases;
 }

@@ -124,28 +124,69 @@ static __global__ void rms_norm_f32(const float * x,
 
     float tmp = 0.0f; // partial sum for thread in warp
 
-    for (int col = tid; col < ncols; col += block_size) {
-        const float xi = x[col];
-        tmp += xi * xi;
+    extern __shared__ float s_sum[];
+
+    const bool use_vec4 = (ncols % 4 == 0)
+        && (reinterpret_cast<uintptr_t>(x)   % sizeof(float4) == 0)
+        && (reinterpret_cast<uintptr_t>(dst)  % sizeof(float4) == 0);
+
+    const int      ncols4 = ncols / 4;
+    const float4 * x4     = reinterpret_cast<const float4 *>(x);
+
+    // pass 1: compute sum of squares
+    if (use_vec4) {
+        // vectorized float4 load/store path
+        for (int col4 = tid; col4 < ncols4; col4 += block_size) {
+            const float4 v = x4[col4];
+            tmp += v.x*v.x + v.y*v.y + v.z*v.z + v.w*v.w;
+        }
+    } else {
+        for (int col = tid; col < ncols; col += block_size) {
+            const float xi = x[col];
+            tmp += xi * xi;
+        }
     }
 
-    // sum up partial sums
-    extern __shared__ float s_sum[];
+    // sum up partial sums and compute scale
     tmp = block_reduce<block_reduce_method::SUM, block_size>(tmp, s_sum);
 
-    const float mean = tmp / ncols;
+    const float mean  = tmp / ncols;
     const float scale = rsqrtf(mean + eps);
 
-    for (int col = tid; col < ncols; col += block_size) {
-        if constexpr (do_multiply && do_add) {
-            const int mul_col = fastmodulo(col, mul_ncols_packed);
-            const int add_col = fastmodulo(col, add_ncols_packed);
-            dst[col]          = scale * x[col] * mul[mul_col] + add[add_col];
-        } else if constexpr (do_multiply) {
-            const int mul_col = fastmodulo(col, mul_ncols_packed);
-            dst[col]          = scale * x[col] * mul[mul_col];
-        } else {
-            dst[col] = scale * x[col];
+    // pass 2: apply scale and write back
+    if (use_vec4) {
+        float4 * dst4 = reinterpret_cast<float4 *>(dst);
+        for (int col4 = tid; col4 < ncols4; col4 += block_size) {
+            float4 v = x4[col4];
+            if constexpr (do_multiply && do_add) {
+                const int b = col4*4;
+                v.x = scale * v.x * mul[fastmodulo(b,   mul_ncols_packed)] + add[fastmodulo(b,   add_ncols_packed)];
+                v.y = scale * v.y * mul[fastmodulo(b+1, mul_ncols_packed)] + add[fastmodulo(b+1, add_ncols_packed)];
+                v.z = scale * v.z * mul[fastmodulo(b+2, mul_ncols_packed)] + add[fastmodulo(b+2, add_ncols_packed)];
+                v.w = scale * v.w * mul[fastmodulo(b+3, mul_ncols_packed)] + add[fastmodulo(b+3, add_ncols_packed)];
+            } else if constexpr (do_multiply) {
+                const int b = col4*4;
+                v.x = scale * v.x * mul[fastmodulo(b,   mul_ncols_packed)];
+                v.y = scale * v.y * mul[fastmodulo(b+1, mul_ncols_packed)];
+                v.z = scale * v.z * mul[fastmodulo(b+2, mul_ncols_packed)];
+                v.w = scale * v.w * mul[fastmodulo(b+3, mul_ncols_packed)];
+            } else {
+                v.x *= scale; v.y *= scale; v.z *= scale; v.w *= scale;
+            }
+            dst4[col4] = v;
+        }
+    } else {
+        for (int col = tid; col < ncols; col += block_size) {
+            if constexpr (do_multiply && do_add) {
+                const int mul_col = fastmodulo(col, mul_ncols_packed);
+                const int add_col = fastmodulo(col, add_ncols_packed);
+                dst[col]          = scale * x[col] * mul[mul_col] + add[add_col];
+            } else if constexpr (do_multiply) {
+                const int mul_col = fastmodulo(col, mul_ncols_packed);
+                dst[col]          = scale * x[col] * mul[mul_col];
+            } else {
+                dst[col] = scale * x[col];
+            }
         }
     }
 }
